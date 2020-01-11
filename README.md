@@ -19,10 +19,9 @@ where the `ip` is the hostname the client uses, and `destination` is the actual
 destination they get connected to. An example `routes.json` is attached in this
 repository: [`routes.json`](./routes.json).
 
-If this is connected to a BungeeCord server, it requires [this patch](https://owo.whats-th.is/8Xe9QR6.patch)
-to be applied to the BungeeCord server; the patch has been built for [Waterfall](https://github.com/papermc/waterfall)
-and might thus only work on that. The BungeeCord server must also disable its
-throttling (set the option to a value `<= 0`).
+If this is connected to a Waterfall server, it requires [this patch](https://proletariat-dictatorship.is-serious.business/64bbFWT.patch)
+to be applied to the Waterfall server. The option for supporting this proxy
+is enabled through the configuration.
 
 ## TODO
 
