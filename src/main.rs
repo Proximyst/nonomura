@@ -237,8 +237,11 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
         let read = routes.read();
         match read.get(ping.hostname()) {
             Some(dest) => dest.to_owned(),
-            // There's nowhere to send them, so let's just ignore their entire ping.
-            None => return Ok(()),
+            None => match read.get("*") {
+                Some(dest) => dest.to_owned(),
+                // There's nowhere to send them, so let's just ignore their entire ping.
+                None => return Ok(()),
+            }
         }
     };
     let mut outbound = match TcpStream::connect(destination).await.ok() {

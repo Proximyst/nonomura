@@ -28,7 +28,7 @@ is enabled through the configuration.
 The following is the current TODO list:
 
   * [✔️ - 2020-01-12] *Make routes modifyable at runtime (RPC?/REST?).*
-  * Add support for a fallback server.
+  * [✔️ - 2020-01-12] *Add support for a fallback server.*
 
 ## Licence
 
