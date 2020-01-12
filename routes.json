@@ -1,4 +1,6 @@
 {
-	"localhost": "localhost:25566",
-	"127.0.0.1": "[::1]:25566"
+  "localhost": "localhost:25566",
+  "mc.example.com": "localhost:25568",
+  "127.0.0.1": "[::1]:25566",
+  "example.com": "localhost:25567"
 }

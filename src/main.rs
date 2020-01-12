@@ -5,19 +5,22 @@ mod error;
 mod ping;
 mod varnum;
 
+use self::ping::Ping;
 use self::prelude::*;
 use bytes::{Buf as _, BytesMut};
+use parking_lot::RwLock;
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
 };
-use self::ping::Ping;
 
 pub mod prelude {
     pub use crate::error::*;
     pub use log::{debug, error, info, trace, warn};
 }
+
+type Routes = Arc<RwLock<HashMap<String, String>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             debug!("{} routed to {}", route, dest);
         }
     }
-    let routes = Arc::new(routes);
+    let routes = Arc::new(RwLock::new(routes));
     // }}}
 
     let addr = env::var("ADDRESS")
@@ -63,9 +66,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "0.0.0.0:25565".into());
     info!("Will attempt to listen on {}...", addr);
 
-    let mut listener = TcpListener::bind(&addr).await?;
+    let listener = TcpListener::bind(&addr).await?;
     info!("Listening on {}.", addr);
 
+    let accepting = tokio::spawn(accept_listeners(listener, Arc::clone(&routes)));
+    let console = tokio::spawn(read_console(Arc::clone(&routes)));
+
+    futures::future::try_join(accepting, console).await?;
+
+    Ok(())
+}
+
+async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
     loop {
         let (stream, addr): (TcpStream, SocketAddr) = match listener.accept().await {
             Ok(ok) => ok,
@@ -87,15 +99,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+async fn read_console(routes: Routes) {
+    use std::io::BufRead as _;
+
+    let stdin = std::io::stdin();
+    let lock = stdin.lock();
+
+    for line in lock.lines() {
+        let line: String = match line {
+            Err(e) => {
+                error!("Cannot read stdin: {:?}", e);
+                return;
+            }
+            Ok(line) => line,
+        };
+        if line.eq_ignore_ascii_case("stop") {
+            info!("Quitting application...");
+            std::process::exit(0);
+        }
+        if line.eq_ignore_ascii_case("list") {
+            let read = routes.read();
+            info!("There are {} routes:", read.len());
+            for (src, dest) in read.iter() {
+                info!(" > {} <-> {}", src, dest);
+            }
+            continue;
+        }
+        if line.starts_with("rem") {
+            let to_remove = line.split(' ').skip(1);
+            let mut write = routes.write();
+            for r in to_remove {
+                match write.remove(r) {
+                    None => info!(" > Route {} did not exist.", r),
+                    Some(dest) => info!(" > Route {} to {} removed.", r, dest),
+                }
+            }
+            continue;
+        }
+        if line.starts_with("add") {
+            let mut to_add = line.split(' ').skip(1);
+            let source = match to_add.next() {
+                Some(s) => s,
+                None => {
+                    error!("syntax: add <source> <destination>");
+                    continue;
+                }
+            };
+            let dest = match to_add.next() {
+                Some(d) => d,
+                None => {
+                    error!("syntax: add <source> <destination>");
+                    continue;
+                }
+            };
+            let mut write = routes.write();
+            write.insert(source.to_owned(), dest.to_owned());
+            info!(" > Added route from {} to {}.", source, dest);
+            continue;
+        }
+        if line.eq_ignore_ascii_case("reload") {
+            info!("Reading routes file...");
+            let routes_file =
+                env::var("ROUTES_FILE").unwrap_or_else(|_| String::from("routes.json"));
+            let new: HashMap<String, String> = {
+                let contents = match std::fs::read_to_string(&routes_file) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Cannot read routes file at {}: {:?}", routes_file, e);
+                        continue;
+                    }
+                };
+                match serde_json::from_str(&contents) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        error!("Cannot deserialize map of routes: {:?}", e);
+                        continue;
+                    }
+                }
+            };
+            let mut write = routes.write();
+            *write = new;
+            continue;
+        }
+        if line.eq_ignore_ascii_case("write") {
+            let read = routes.read();
+            let routes_file =
+                env::var("ROUTES_FILE").unwrap_or_else(|_| String::from("routes.json"));
+            info!("Writing {} routes to {}...", read.len(), routes_file);
+            let mapped = match serde_json::to_string_pretty(&*read) {
+                Err(e) => {
+                    error!("Cannot serialize routes: {:?}", e);
+                    continue;
+                },
+                Ok(s) => s,
+            };
+            if let Err(e) = std::fs::write(&routes_file, mapped) {
+                error!("Could not write to {}: {:?}", routes_file, e);
+            }
+            continue;
+        }
+    }
+}
+
 /// If a handshake begins with this monstrosity, it's a pre-rewrite ping and
 /// must be handled accordingly.
 const LEGACY_PING_PREFIX: [u8; 3] = [0xFE, 0x01, 0xFA];
 
-async fn proxy(
-    mut stream: TcpStream,
-    addr: SocketAddr,
-    routes: Arc<HashMap<String, String>>,
-) -> Result<()> {
+async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Result<()> {
     // Alright, new Minecraft connection. It will now send the first packet:
     // the handshake. This will be used to find out the hostname wanted. If the
     // client is on a legacy client, this should be detectable by its first
@@ -123,10 +233,13 @@ async fn proxy(
     let mut ping = Ping::read_ping(&mut stream, &mut buf, legacy).await?;
     trace!("{} ping resolved as: {:?}", addr, ping);
 
-    let destination = match routes.get(ping.hostname()) {
-        Some(dest) => dest,
-        // There's nowhere to send them, so let's just ignore their entire ping.
-        None => return Ok(()),
+    let destination = {
+        let read = routes.read();
+        match read.get(ping.hostname()) {
+            Some(dest) => dest.to_owned(),
+            // There's nowhere to send them, so let's just ignore their entire ping.
+            None => return Ok(()),
+        }
     };
     let mut outbound = match TcpStream::connect(destination).await.ok() {
         Some(o) => o,
