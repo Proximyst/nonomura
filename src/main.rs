@@ -2,6 +2,7 @@
 #![warn(clippy::all)]
 
 mod error;
+mod haproxy;
 mod ping;
 mod varnum;
 
@@ -87,8 +88,6 @@ async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
             }
         };
 
-        info!("Connection opened from {}.", addr);
-
         let routes = Arc::clone(&routes);
         let proxy = async move {
             if let Err(e) = proxy(stream, addr, routes).await {
@@ -100,6 +99,7 @@ async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
 }
 
 async fn read_console(routes: Routes) {
+    // {{{ read console
     use std::io::BufRead as _;
 
     let stdin = std::io::stdin();
@@ -190,7 +190,7 @@ async fn read_console(routes: Routes) {
                 Err(e) => {
                     error!("Cannot serialize routes: {:?}", e);
                     continue;
-                },
+                }
                 Ok(s) => s,
             };
             if let Err(e) = std::fs::write(&routes_file, mapped) {
@@ -199,6 +199,7 @@ async fn read_console(routes: Routes) {
             continue;
         }
     }
+    // }}}
 }
 
 /// If a handshake begins with this monstrosity, it's a pre-rewrite ping and
@@ -231,7 +232,7 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
 
     // We know if it's legacy now, and thus know how to read the hostname.
     let mut ping = Ping::read_ping(&mut stream, &mut buf, legacy).await?;
-    trace!("{} ping resolved as: {:?}", addr, ping);
+    trace!("{}'s ping resolved as: {:?}", addr, ping);
 
     let destination = {
         let read = routes.read();
@@ -240,25 +241,54 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
             None => match read.get("*") {
                 Some(dest) => dest.to_owned(),
                 // There's nowhere to send them, so let's just ignore their entire ping.
-                None => return Ok(()),
-            }
+                None => {
+                    warn!(
+                        "{} opened a connection but had no possible destination for the hostname {}.",
+                        addr, ping.hostname(),
+                    );
+                    return Ok(());
+                }
+            },
         }
     };
+    info!("Proxying {} to {}.", addr, destination);
+
     let mut outbound = match TcpStream::connect(destination).await.ok() {
         Some(o) => o,
         // Server isn't up, let's just close the connection.
         None => return Ok(()),
     };
 
-    // {{{ re-do ping
-    ping.set_ip(addr.to_string());
+    if env::var("PROXY_PROTOCOL").is_ok() {
+        // {{{ HAProxy PROXY protocol
+        let local_addr = stream.local_addr()?;
 
+        let proxy = haproxy::ProxyHeader::Version2 {
+            command: haproxy::ProxyCommand::Proxy,
+            transport_protocol: haproxy::ProxyTransportProtocol::Stream,
+
+            source_addr: addr.ip(),
+            dest_addr: local_addr.ip(),
+
+            source_port: addr.port(),
+            dest_port: local_addr.port(),
+        };
+
+        let encoded = proxy.encode()?;
+        let bytes = encoded.bytes();
+        outbound.write_all(bytes).await?;
+        outbound.flush().await?;
+    // }}}
+    } else {
+        ping.set_ip(addr.to_string());
+    }
+
+    // {{{ re-do ping
     let encoded = ping.encode();
     let encoded = encoded.bytes();
     outbound.write_all(encoded).await?;
     outbound.flush().await?;
     // }}}
-
     // {{{ copy data back and forth
     let (mut ri, mut wi) = stream.split();
     let (mut ro, mut wo) = outbound.split();

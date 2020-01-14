@@ -19,16 +19,18 @@ where the `ip` is the hostname the client uses, and `destination` is the actual
 destination they get connected to. An example `routes.json` is attached in this
 repository: [`routes.json`](./routes.json).
 
-If this is connected to a Waterfall server, it requires [this patch](https://proletariat-dictatorship.is-serious.business/64bbFWT.patch)
-to be applied to the Waterfall server. The option for supporting this proxy
-is enabled through the configuration.
+If this is connected to a BungeeCord/Waterfall server, it requires to enable
+the `proxy-protocol` option in the listener configuration. This might also
+require to disable connection throttling by setting it to 0.
 
 ## TODO
 
 The following is the current TODO list:
 
-  * [✔️ - 2020-01-12] *Make routes modifyable at runtime (RPC?/REST?).*
-  * [✔️ - 2020-01-12] *Add support for a fallback server.*
+  * [✔️- 2020-01-12] *Make routes modifyable at runtime (RPC?/REST?).*
+  * [✔️- 2020-01-12] *Add support for a fallback server.*
+  * [✔️- 2020-01-13] *Add support for HAProxy's PROXY protocol to avoid
+  patching the Waterfall server.*
 
 ## Licence
 
