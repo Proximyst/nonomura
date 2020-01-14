@@ -41,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
     // }}}
+    info!(concat!(env!("CARGO_PKG_NAME"), " (v", env!("CARGO_PKG_VERSION"), ")"));
 
     // {{{ reading routes
     info!("Reading routes file...");
