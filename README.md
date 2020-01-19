@@ -4,6 +4,17 @@ A Minecraft server proxy written in [Rust](https://rust-lang.org/).
 
 ## Usage
 
+Compile the project on your server (important!) with `cargo build --release`.
+If you don't supply `--release`, it will be extremely unoptimised and your
+performance will stagnate significantly.
+
+**Achtung**: This project is optimised towards hosting upwards of 40 players
+concurrently. Any higher amount might not work as well as the lower amounts,
+and any fixes are welcome for this so long as lower amounts do not become
+worse in performance. Performance hits on higher player counts are unwelcome
+but not disallowed; performance hits on lower player counts are both
+unwelcome and disallowed.
+
 The bound IP can be set in the environment variable `ADDRESS`.
 
 The routes are to be created in the file pointed at by the environment variable
