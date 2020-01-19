@@ -2,19 +2,19 @@
 #![warn(clippy::all)]
 
 mod error;
-mod haproxy;
 mod ping;
 mod varnum;
 
 use self::ping::Ping;
 use self::prelude::*;
-use bytes::{Buf as _, BytesMut};
+use async_std::{
+    net::{TcpListener, TcpStream},
+    prelude::FutureExt as _,
+};
+use bytes::{Buf as _, BufMut as _, BytesMut};
+use futures::io::AsyncWriteExt as _;
 use parking_lot::RwLock;
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
 
 pub mod prelude {
     pub use crate::error::*;
@@ -23,7 +23,7 @@ pub mod prelude {
 
 type Routes = Arc<RwLock<HashMap<String, String>>>;
 
-#[tokio::main]
+#[async_std::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
 
@@ -43,7 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
     // }}}
-    info!(concat!(env!("CARGO_PKG_NAME"), " (v", env!("CARGO_PKG_VERSION"), ")"));
+    info!(concat!(
+        env!("CARGO_PKG_NAME"),
+        " (v",
+        env!("CARGO_PKG_VERSION"),
+        ")"
+    ));
 
     // {{{ reading routes
     info!("Reading routes file...");
@@ -73,15 +78,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&addr).await?;
     info!("Listening on {}.", addr);
 
-    let accepting = tokio::spawn(accept_listeners(listener, Arc::clone(&routes)));
-    let console = tokio::spawn(read_console(Arc::clone(&routes)));
+    use async_std::prelude::*;
+    let accepting = async_std::task::spawn(accept_listeners(listener, Arc::clone(&routes)));
+    let console = async_std::task::spawn(read_console(Arc::clone(&routes)));
 
-    futures::future::try_join(accepting, console).await?;
+    accepting.join(console).await;
 
     Ok(())
 }
 
-async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
+async fn accept_listeners(listener: TcpListener, routes: Routes) {
     loop {
         let (stream, addr): (TcpStream, SocketAddr) = match listener.accept().await {
             Ok(ok) => ok,
@@ -93,11 +99,15 @@ async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
 
         let routes = Arc::clone(&routes);
         let proxy = async move {
-            if let Err(e) = proxy(stream, addr, routes).await {
+            let stream = stream;
+            if let Err(e) = proxy(&stream, addr, routes).await {
                 error!("Error during proxying {}: {:?}", addr, e);
             }
+            if let Err(e) = stream.shutdown(async_std::net::Shutdown::Both) {
+                error!("Error during shutting down of {}: {:?}", addr, e);
+            }
         };
-        tokio::spawn(proxy);
+        async_std::task::spawn(proxy);
     }
 }
 
@@ -209,7 +219,7 @@ async fn read_console(routes: Routes) {
 /// must be handled accordingly.
 const LEGACY_PING_PREFIX: [u8; 3] = [0xFE, 0x01, 0xFA];
 
-async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Result<()> {
+async fn proxy(stream: &TcpStream, addr: SocketAddr, routes: Routes) -> Result<()> {
     // Alright, new Minecraft connection. It will now send the first packet:
     // the handshake. This will be used to find out the hostname wanted. If the
     // client is on a legacy client, this should be detectable by its first
@@ -221,21 +231,40 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
     // data as it should be read, and add ":<client_ip>" on the hostname.
     // I'd rather truncate hostname than truncate IP.
 
+    let (ri, wi) = &mut (stream, stream);
+
+    trace!("Proxy called for {}!", addr);
     // {{{ read initial buffer and determine legacy
     let mut buf = BytesMut::with_capacity(3);
-    stream.read_buf(&mut buf).await?;
-    while buf.len() < 3 {
-        stream.read_buf(&mut buf).await?;
-        tokio::time::delay_for(Duration::from_millis(1)).await;
+    while buf.remaining() < 3 {
+        let mut bytes = [0; 16];
+        let written = ri.read(&mut bytes[..]).await?;
+        if buf.remaining_mut() < written {
+            buf.reserve(written);
+        }
+        buf.put_slice(&bytes[..]);
+        async_std::task::sleep(Duration::from_millis(2)).await;
 
         // Ensure we have the 3 bytes we require first.
     }
+    trace!(
+        "Remaining / len / cap: {} / {} / {}",
+        buf.remaining(),
+        buf.len(),
+        buf.capacity()
+    );
     let legacy = buf == LEGACY_PING_PREFIX[..];
     // }}}
 
     // We know if it's legacy now, and thus know how to read the hostname.
-    let mut ping = Ping::read_ping(&mut stream, &mut buf, legacy).await?;
+    let mut ping = Ping::read_ping(ri, &mut buf, legacy).await?;
     trace!("{}'s ping resolved as: {:?}", addr, ping);
+    trace!(
+        "Remaining / len / cap: {} / {} / {}",
+        buf.remaining(),
+        buf.len(),
+        buf.capacity()
+    );
 
     let destination = {
         let read = routes.read();
@@ -254,7 +283,12 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
             },
         }
     };
-    info!("Proxying {} requesting {} to {}.", addr, ping.hostname(), destination);
+    info!(
+        "Proxying {} requesting {} to {}.",
+        addr,
+        ping.hostname(),
+        destination
+    );
 
     let mut outbound = match TcpStream::connect(destination).await.ok() {
         Some(o) => o,
@@ -266,21 +300,20 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
         // {{{ HAProxy PROXY protocol
         let local_addr = stream.local_addr()?;
 
-        let proxy = haproxy::ProxyHeader::Version2 {
-            command: haproxy::ProxyCommand::Proxy,
-            transport_protocol: haproxy::ProxyTransportProtocol::Stream,
-
-            source_addr: addr.ip(),
-            dest_addr: local_addr.ip(),
-
-            source_port: addr.port(),
-            dest_port: local_addr.port(),
+        use proxy_protocol::{binary::*, ProxyHeader};
+        let proxy = ProxyHeader::Version2 {
+            command: ProxyCommand::Proxy,
+            transport_protocol: ProxyTransportProtocol::Stream,
+            address: ProxyAddress::from_ipaddr(addr.ip(), local_addr.ip()),
+            source_port: Some(addr.port()),
+            destination_port: Some(local_addr.port()),
         };
 
         let encoded = proxy.encode()?;
         let bytes = encoded.bytes();
         outbound.write_all(bytes).await?;
         outbound.flush().await?;
+        trace!("written haproxy");
     // }}}
     } else {
         ping.set_ip(addr.to_string());
@@ -291,16 +324,23 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
     let encoded = encoded.bytes();
     outbound.write_all(encoded).await?;
     outbound.flush().await?;
+    trace!("pinged");
     // }}}
-    // {{{ copy data back and forth
-    let (mut ri, mut wi) = stream.split();
-    let (mut ro, mut wo) = outbound.split();
 
-    let client_to_server = tokio::io::copy(&mut ri, &mut wo);
-    let server_to_client = tokio::io::copy(&mut ro, &mut wi);
+    outbound.write_all(&buf).await?;
+    outbound.flush().await?;
+    trace!("dumped remaining buf");
+
+    // {{{ copy data back and forth
+    use futures::io::AsyncReadExt as _;
+    let (ro, wo) = &mut (&outbound, &outbound);
+
+    trace!("Copying...");
+    let one = async_std::io::copy(ri, wo);
+    let two = async_std::io::copy(ro, wi);
 
     trace!("Joining copyers...");
-    futures::future::try_join(client_to_server, server_to_client).await?;
+    one.try_join(two).await?;
     // }}}
 
     Ok(())
