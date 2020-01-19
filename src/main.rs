@@ -25,6 +25,8 @@ type Routes = Arc<RwLock<HashMap<String, String>>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv::dotenv().ok();
+
     // {{{ setting up simplelog
     {
         use simplelog::*;
@@ -252,7 +254,7 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
             },
         }
     };
-    info!("Proxying {} to {}.", addr, destination);
+    info!("Proxying {} requesting {} to {}.", addr, ping.hostname(), destination);
 
     let mut outbound = match TcpStream::connect(destination).await.ok() {
         Some(o) => o,

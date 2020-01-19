@@ -21,6 +21,8 @@ simplelog = "~0.7"
 
 parking_lot = "0.10"
 
+dotenv = "0.15"
+
 [profile.release]
 opt-level = 3
 debug-assertions = false
