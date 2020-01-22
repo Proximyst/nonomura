@@ -2,8 +2,7 @@ use crate::varnum::*;
 use bytes::{Buf as _, BufMut as _, BytesMut};
 use encoding::Encoding as _;
 use std::time::Duration;
-use futures::io::AsyncReadExt as _; 
-use async_std::net::TcpStream;
+use tokio::{io::AsyncReadExt as _, net::TcpStream};
 
 use crate::prelude::*;
 
@@ -24,7 +23,7 @@ pub enum Ping {
 }
 
 impl Ping {
-    pub async fn read_ping(stream: &mut &TcpStream, buf: &mut BytesMut, is_legacy: bool) -> Result<Self> {
+    pub async fn read_ping(stream: &mut TcpStream, buf: &mut BytesMut, is_legacy: bool) -> Result<Self> {
         if is_legacy {
             Self::read_legacy_ping(stream, buf).await
         } else {
@@ -127,7 +126,7 @@ impl Ping {
     ///
     /// Format and details: <https://wiki.vg/Server_List_Ping#1.6>
     // {{{ read_legacy_ping(stream, buf) -> Result<Ping::Legacy>
-    async fn read_legacy_ping(stream: &mut &TcpStream, buf: &mut BytesMut) -> Result<Self> {
+    async fn read_legacy_ping(stream: &mut TcpStream, buf: &mut BytesMut) -> Result<Self> {
         // Look for 48 00 6F 00 73 00 74 ?? ?? ??.
         // The hostname length is then the 2 next bytes, then comes the
         // hostname itself as a UTF-16BE string.
@@ -135,16 +134,11 @@ impl Ping {
         // 2 bytes for length of MC|PingHost, 11 for MC|PingHost, 2 for length
         // of the rest of the packet.
         buf.reserve(15);
-        while buf.remaining() < 15 {
-            let mut bytes = [0; 15];
-            let written = stream.read(&mut bytes[..]).await?;
-            if buf.remaining_mut() < written {
-                buf.reserve(written);
-            }
-            buf.put_slice(&bytes[..]);
-            async_std::task::sleep(Duration::from_millis(2)).await;
+        while buf.remaining() < buf.capacity() {
+            stream.read_buf(buf).await?;
+            tokio::time::delay_for(Duration::from_millis(2)).await;
         }
-    trace!("Remaining / len / cap: {} / {} / {}", buf.remaining(), buf.len(), buf.capacity());
+        stream.read_buf(buf).await?;
 
         // Ensure the prefix is correct.
         if buf.get_u8() != 0xFE || buf.get_u8() != 0x01 || buf.get_u8() != 0xFA {
@@ -166,13 +160,8 @@ impl Ping {
         let length = buf.get_i16() as usize;
         buf.reserve(length);
         while buf.remaining() < length {
-            let mut bytes = [0; 15];
-            let written = stream.read(&mut bytes[..]).await?;
-            if buf.remaining_mut() < written {
-                buf.reserve(written);
-            }
-            buf.put_slice(&bytes[..]);
-            async_std::task::sleep(Duration::from_millis(2)).await;
+            stream.read_buf(buf).await?;
+            tokio::time::delay_for(Duration::from_millis(2)).await;
         }
         // The rest of the packet should now be available.
 
@@ -212,33 +201,20 @@ impl Ping {
     ///
     /// Formats and details: <https://wiki.vg/Server_List_Ping#Current>
     // {{{ read_netty_ping(stream, buf) -> Result<Ping::Netty>
-    async fn read_netty_ping(stream: &mut &TcpStream, buf: &mut BytesMut) -> Result<Self> {
+    async fn read_netty_ping(stream: &mut TcpStream, buf: &mut BytesMut) -> Result<Self> {
         // Format: vi_Length, vi_PacketID, b_Data[]
         // Data should be: vi_ProtocolVer, vi_HostNameLen, s_HostName, ...
         // This means we need to find vi_HostNameLen & s_HostName.
 
         buf.reserve(2);
-        while buf.remaining() < 2 {
-            let mut bytes = [0; 16];
-            let written = stream.read(&mut bytes[..]).await?;
-            if buf.remaining_mut() < written {
-                buf.reserve(written);
-            }
-            buf.put_slice(&bytes[..]);
-            async_std::task::sleep(Duration::from_millis(2)).await;
-        }
+        stream.read_buf(buf).await?;
 
         let (length, _) = read_varint_bytes(buf)?;
 
         buf.reserve(length as usize - buf.remaining());
-        while buf.remaining() < length as usize {
-            let mut bytes = [0; 16];
-            let written = stream.read(&mut bytes[..]).await?;
-            if buf.remaining_mut() < written {
-                buf.reserve(written);
-            }
-            buf.put_slice(&bytes[..]);
-            async_std::task::sleep(Duration::from_millis(2)).await;
+        while buf.len() != buf.capacity() {
+            stream.read_buf(buf).await?;
+            tokio::time::delay_for(Duration::from_millis(2)).await;
         }
 
         let (_packet_id, _) = read_varint_bytes(buf)?;
