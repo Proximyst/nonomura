@@ -265,15 +265,17 @@ async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Resu
 
     let destination = {
         let read = routes.read();
-        match read.get(ping.hostname()) {
+        let hostname = ping.remove_fml();
+        match read.get(hostname) {
             Some(dest) => dest.to_owned(),
             None => match read.get("*") {
                 Some(dest) => dest.to_owned(),
                 // There's nowhere to send them, so let's just ignore their entire ping.
                 None => {
                     warn!(
-                        "{} opened a connection but had no possible destination for the hostname {}.",
-                        addr, ping.hostname(),
+                        "{} opened a connection but had no possible destination \
+                        for the hostname {} (FML removed).",
+                        addr, hostname,
                     );
                     return Ok(());
                 }

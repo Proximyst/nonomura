@@ -23,7 +23,11 @@ pub enum Ping {
 }
 
 impl Ping {
-    pub async fn read_ping(stream: &mut TcpStream, buf: &mut BytesMut, is_legacy: bool) -> Result<Self> {
+    pub async fn read_ping(
+        stream: &mut TcpStream,
+        buf: &mut BytesMut,
+        is_legacy: bool,
+    ) -> Result<Self> {
         if is_legacy {
             Self::read_legacy_ping(stream, buf).await
         } else {
@@ -39,22 +43,26 @@ impl Ping {
         }
     }
 
+    pub fn remove_fml(&self) -> &str {
+        let hostname = self.hostname();
+        if hostname.ends_with("FML2") {
+            hostname.trim_end_matches("FML2")
+        } else if hostname.ends_with("FML") {
+            hostname.trim_end_matches("FML")
+        } else {
+            hostname
+        }
+    }
+
     pub fn set_ip(&mut self, ip: String) {
+        let mut new: String = format!("{}${}", self.hostname(), ip);
+        if new.len() > 255 {
+            new = new.chars().skip(new.len() - 255).collect();
+        }
+
         match self {
-            Self::Netty { address, .. } => {
-                let mut new: String = format!("{}${}", address, ip);
-                if new.len() > 255 {
-                    new = new.chars().skip(new.len() - 255).collect();
-                }
-                *address = new;
-            }
-            Self::Legacy { hostname, .. } => {
-                let mut new: String = format!("{}${}", hostname, ip);
-                if new.len() > 255 {
-                    new = new.chars().skip(new.len() - 255).collect();
-                }
-                *hostname = new;
-            }
+            Self::Netty { address, .. } => *address = new,
+            Self::Legacy { hostname, .. } => *hostname = new,
         }
     }
 
