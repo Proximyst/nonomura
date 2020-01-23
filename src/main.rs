@@ -12,7 +12,7 @@ use bytes::{Buf as _, BytesMut};
 use parking_lot::RwLock;
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    io::{AsyncReadExt as _, AsyncWriteExt as _, ErrorKind},
     net::{TcpListener, TcpStream},
 };
 
@@ -43,7 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap();
     }
     // }}}
-    info!(concat!(env!("CARGO_PKG_NAME"), " (v", env!("CARGO_PKG_VERSION"), ")"));
+    info!(concat!(
+        env!("CARGO_PKG_NAME"),
+        " (v",
+        env!("CARGO_PKG_VERSION"),
+        ")"
+    ));
 
     // {{{ reading routes
     info!("Reading routes file...");
@@ -83,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
     loop {
-        let (stream, addr): (TcpStream, SocketAddr) = match listener.accept().await {
+        let (mut stream, addr): (TcpStream, SocketAddr) = match listener.accept().await {
             Ok(ok) => ok,
             Err(e) => {
                 error!("Error occurred while listening: {:?}", e);
@@ -93,8 +98,29 @@ async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
 
         let routes = Arc::clone(&routes);
         let proxy = async move {
-            if let Err(e) = proxy(stream, addr, routes).await {
-                error!("Error during proxying {}: {:?}", addr, e);
+            if let Err(e) = proxy(&mut stream, addr, routes).await {
+                if let Some(e) = e.downcast_ref::<tokio::io::Error>() {
+                    match e.kind() {
+                        // All disconnection errors by A) actual disconnect
+                        // or B) by invalid data off the bat are to be thrown
+                        // away.
+                        ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected
+                        | ErrorKind::TimedOut
+                        | ErrorKind::InvalidData => {}
+
+                        e => {
+                            error!("Error during proxying {}: {:?}", addr, e);
+                        }
+                    }
+                } else {
+                    error!("Error during proxying {}: {:?}", addr, e);
+                }
+            }
+            if let Err(e) = stream.shutdown(std::net::Shutdown::Both) {
+                error!("Error during stream shutdown of {}: {:?}", addr, e);
             }
         };
         tokio::spawn(proxy);
@@ -209,7 +235,7 @@ async fn read_console(routes: Routes) {
 /// must be handled accordingly.
 const LEGACY_PING_PREFIX: [u8; 3] = [0xFE, 0x01, 0xFA];
 
-async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Result<()> {
+async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Result<()> {
     // Alright, new Minecraft connection. It will now send the first packet:
     // the handshake. This will be used to find out the hostname wanted. If the
     // client is on a legacy client, this should be detectable by its first
@@ -234,7 +260,7 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
     // }}}
 
     // We know if it's legacy now, and thus know how to read the hostname.
-    let mut ping = Ping::read_ping(&mut stream, &mut buf, legacy).await?;
+    let mut ping = Ping::read_ping(stream, &mut buf, legacy).await?;
     trace!("{}'s ping resolved as: {:?}", addr, ping);
 
     let destination = {
@@ -254,7 +280,12 @@ async fn proxy(mut stream: TcpStream, addr: SocketAddr, routes: Routes) -> Resul
             },
         }
     };
-    info!("Proxying {} requesting {} to {}.", addr, ping.hostname(), destination);
+    info!(
+        "Proxying {} requesting {} to {}.",
+        addr,
+        ping.hostname(),
+        destination
+    );
 
     let mut outbound = match TcpStream::connect(destination).await.ok() {
         Some(o) => o,
