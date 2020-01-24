@@ -109,7 +109,9 @@ async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
                         | ErrorKind::BrokenPipe
                         | ErrorKind::NotConnected
                         | ErrorKind::TimedOut
-                        | ErrorKind::InvalidData => {}
+                        | ErrorKind::InvalidData => {
+                            debug!("Disconnected {}; error: {:?}", addr, e);
+                        }
 
                         e => {
                             error!("Error during proxying {}: {:?}", addr, e);
@@ -260,7 +262,7 @@ async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Resu
     // }}}
 
     // We know if it's legacy now, and thus know how to read the hostname.
-    let mut ping = Ping::read_ping(stream, &mut buf, legacy).await?;
+    let ping = Ping::read_ping(stream, &mut buf, legacy).await?;
     trace!("{}'s ping resolved as: {:?}", addr, ping);
 
     let destination = {
@@ -295,46 +297,58 @@ async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Resu
         None => return Ok(()),
     };
 
-    if env::var("PROXY_PROTOCOL").is_ok() {
-        // {{{ HAProxy PROXY protocol
-        let local_addr = stream.local_addr()?;
+    async fn copy(
+        stream: &mut TcpStream,
+        outbound: &mut TcpStream,
+        addr: SocketAddr,
+        mut ping: Ping,
+    ) -> Result<()> {
+        if env::var("PROXY_PROTOCOL").is_ok() {
+            // {{{ HAProxy PROXY protocol
+            let local_addr = stream.local_addr()?;
 
-        let proxy = haproxy::ProxyHeader::Version2 {
-            command: haproxy::ProxyCommand::Proxy,
-            transport_protocol: haproxy::ProxyTransportProtocol::Stream,
+            let proxy = haproxy::ProxyHeader::Version2 {
+                command: haproxy::ProxyCommand::Proxy,
+                transport_protocol: haproxy::ProxyTransportProtocol::Stream,
 
-            source_addr: addr.ip(),
-            dest_addr: local_addr.ip(),
+                source_addr: addr.ip(),
+                dest_addr: local_addr.ip(),
 
-            source_port: addr.port(),
-            dest_port: local_addr.port(),
-        };
+                source_port: addr.port(),
+                dest_port: local_addr.port(),
+            };
 
-        let encoded = proxy.encode()?;
-        let bytes = encoded.bytes();
-        outbound.write_all(bytes).await?;
+            let encoded = proxy.encode()?;
+            let bytes = encoded.bytes();
+            outbound.write_all(bytes).await?;
+            outbound.flush().await?;
+        // }}}
+        } else {
+            ping.set_ip(addr.to_string());
+        }
+
+        // {{{ re-do ping
+        let encoded = ping.encode();
+        let encoded = encoded.bytes();
+        outbound.write_all(encoded).await?;
         outbound.flush().await?;
-    // }}}
-    } else {
-        ping.set_ip(addr.to_string());
+        // }}}
+        // {{{ copy data back and forth
+        let (mut ri, mut wi) = stream.split();
+        let (mut ro, mut wo) = outbound.split();
+
+        let client_to_server = tokio::io::copy(&mut ri, &mut wo);
+        let server_to_client = tokio::io::copy(&mut ro, &mut wi);
+
+        trace!("Joining copyers...");
+        futures::future::try_join(client_to_server, server_to_client).await?;
+        // }}}
+        Ok(())
     }
+    let res = copy(stream, &mut outbound, addr, ping).await;
 
-    // {{{ re-do ping
-    let encoded = ping.encode();
-    let encoded = encoded.bytes();
-    outbound.write_all(encoded).await?;
-    outbound.flush().await?;
-    // }}}
-    // {{{ copy data back and forth
-    let (mut ri, mut wi) = stream.split();
-    let (mut ro, mut wo) = outbound.split();
-
-    let client_to_server = tokio::io::copy(&mut ri, &mut wo);
-    let server_to_client = tokio::io::copy(&mut ro, &mut wi);
-
-    trace!("Joining copyers...");
-    futures::future::try_join(client_to_server, server_to_client).await?;
-    // }}}
+    outbound.shutdown(std::net::Shutdown::Both)?;
+    res?;
 
     Ok(())
 }
