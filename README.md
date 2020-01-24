@@ -42,6 +42,9 @@ The following is the current TODO list:
   * [✔️- 2020-01-12] *Add support for a fallback server.*
   * [✔️- 2020-01-13] *Add support for HAProxy's PROXY protocol to avoid
   patching the Waterfall server.*
+  * Make copying go around on a few select threads and spend at most `n`
+  timeunits on it. This must have buckets of copying streams which will simply
+  be added to as time goes on and more streams must be copied.
 
 ## Licence
 
