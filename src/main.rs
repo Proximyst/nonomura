@@ -5,9 +5,11 @@ mod error;
 mod haproxy;
 mod ping;
 mod varnum;
+mod wrappers;
 
 use self::ping::Ping;
 use self::prelude::*;
+use self::wrappers::TcpStreamWrapper;
 use bytes::{Buf as _, BytesMut};
 use parking_lot::RwLock;
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
@@ -88,13 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
     loop {
-        let (mut stream, addr): (TcpStream, SocketAddr) = match listener.accept().await {
+        let (stream, addr): (TcpStream, SocketAddr) = match listener.accept().await {
             Ok(ok) => ok,
             Err(e) => {
                 error!("Error occurred while listening: {:?}", e);
                 continue;
             }
         };
+        let mut stream = TcpStreamWrapper(stream, addr);
 
         let routes = Arc::clone(&routes);
         let proxy = async move {
@@ -120,9 +123,6 @@ async fn accept_listeners(mut listener: TcpListener, routes: Routes) {
                 } else {
                     error!("Error during proxying {}: {:?}", addr, e);
                 }
-            }
-            if let Err(e) = stream.shutdown(std::net::Shutdown::Both) {
-                error!("Error during stream shutdown of {}: {:?}", addr, e);
             }
         };
         tokio::spawn(proxy);
@@ -237,7 +237,7 @@ async fn read_console(routes: Routes) {
 /// must be handled accordingly.
 const LEGACY_PING_PREFIX: [u8; 3] = [0xFE, 0x01, 0xFA];
 
-async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Result<()> {
+async fn proxy(stream: &mut TcpStreamWrapper, addr: SocketAddr, routes: Routes) -> Result<()> {
     // Alright, new Minecraft connection. It will now send the first packet:
     // the handshake. This will be used to find out the hostname wanted. If the
     // client is on a legacy client, this should be detectable by its first
@@ -292,7 +292,10 @@ async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Resu
     );
 
     let mut outbound = match TcpStream::connect(destination).await.ok() {
-        Some(o) => o,
+        Some(o) => {
+            let addr = o.local_addr()?;
+            TcpStreamWrapper(o, addr)
+        }
         // Server isn't up, let's just close the connection.
         None => return Ok(()),
     };
@@ -345,10 +348,7 @@ async fn proxy(stream: &mut TcpStream, addr: SocketAddr, routes: Routes) -> Resu
         // }}}
         Ok(())
     }
-    let res = copy(stream, &mut outbound, addr, ping).await;
-
-    outbound.shutdown(std::net::Shutdown::Both)?;
-    res?;
+    copy(stream, &mut outbound, addr, ping).await?;
 
     Ok(())
 }

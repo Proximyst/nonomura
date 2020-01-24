@@ -2,9 +2,10 @@ use crate::varnum::*;
 use bytes::{Buf as _, BufMut as _, BytesMut};
 use encoding::Encoding as _;
 use std::time::Duration;
-use tokio::{io::AsyncReadExt as _, net::TcpStream};
+use tokio::io::AsyncReadExt as _;
 
 use crate::prelude::*;
+use crate::wrappers::TcpStreamWrapper;
 
 #[derive(Debug, PartialEq, Eq)]
 #[allow(dead_code)] // Compiler bug - https://github.com/rust-lang/rust/issues/64362
@@ -24,7 +25,7 @@ pub enum Ping {
 
 impl Ping {
     pub async fn read_ping(
-        stream: &mut TcpStream,
+        stream: &mut TcpStreamWrapper,
         buf: &mut BytesMut,
         is_legacy: bool,
     ) -> Result<Self> {
@@ -134,7 +135,7 @@ impl Ping {
     ///
     /// Format and details: <https://wiki.vg/Server_List_Ping#1.6>
     // {{{ read_legacy_ping(stream, buf) -> Result<Ping::Legacy>
-    async fn read_legacy_ping(stream: &mut TcpStream, buf: &mut BytesMut) -> Result<Self> {
+    async fn read_legacy_ping(stream: &mut TcpStreamWrapper, buf: &mut BytesMut) -> Result<Self> {
         // Look for 48 00 6F 00 73 00 74 ?? ?? ??.
         // The hostname length is then the 2 next bytes, then comes the
         // hostname itself as a UTF-16BE string.
@@ -209,7 +210,7 @@ impl Ping {
     ///
     /// Formats and details: <https://wiki.vg/Server_List_Ping#Current>
     // {{{ read_netty_ping(stream, buf) -> Result<Ping::Netty>
-    async fn read_netty_ping(stream: &mut TcpStream, buf: &mut BytesMut) -> Result<Self> {
+    async fn read_netty_ping(stream: &mut TcpStreamWrapper, buf: &mut BytesMut) -> Result<Self> {
         // Format: vi_Length, vi_PacketID, b_Data[]
         // Data should be: vi_ProtocolVer, vi_HostNameLen, s_HostName, ...
         // This means we need to find vi_HostNameLen & s_HostName.
