@@ -26,7 +26,7 @@ pub enum ProxyError {
         source: proxy_protocol::EncodeError,
     },
 
-    Unsupported,
+    Libc,
 }
 
 type Result<T, E = ProxyError> = std::result::Result<T, E>;
