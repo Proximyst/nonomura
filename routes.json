@@ -1,4 +1,10 @@
 {
-  "localhost": "localhost:25566",
-  "*": "localhost:25566"
+  "localhost": {
+    "address": "127.0.0.1:25566",
+    "proxy_protocol": false
+  },
+  "*": {
+    "address": "127.0.0.1:25566",
+    "proxy_protocol": false
+  }
 }
